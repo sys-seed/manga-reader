@@ -124,7 +124,19 @@ async function viewLibrary() {
     document.getElementById("cont").innerHTML = !words.length && !st.genre && cont.length ? `<h2 style="margin-top:4px">▶️ Continuer la lecture</h2><div class="hscroll">${cont.map(m =>
       `<a class="card" href="#/r/${enc(m.id)}/${enc(m.last.chapter)}">${coverImg(m.id)}<div class="t">${esc(m.title)}</div><div class="s">${esc(m.last.label)}</div></a>`).join("")}</div><h2>Tous les mangas (${list.length})</h2>` : "";
     document.getElementById("grid").innerHTML = list.length ? `<div class="grid">${list.map(card).join("")}</div>` :
-      `<div class="empty">${LIB.mangas.length ? "Aucun résultat." : "Bibliothèque vide.<br><br>Importe tes .cbz/.zip, un dossier de chapitres ou des images depuis l'app Fichiers.<br><br><a class='btn primary' href='#/settings'>➕ Importer</a>"}</div>`;
+      `<div class="empty">${LIB.mangas.length ? "Aucun résultat." : "Bibliothèque vide.<br><br>Importe tes .cbz/.zip, un dossier de chapitres ou des images depuis l'app Fichiers.<br><br><a class='btn primary' href='#/settings'>➕ Importer</a><br><br><button class='ghost' id='seed'>Importer fiches & stats Pythonista</button>"}</div>`;
+    const seed = document.getElementById("seed");
+    if (seed) seed.onclick = async () => {
+      seed.disabled = true; seed.textContent = "Import…";
+      try {
+        const out = await MRDB.importBundledPythonista();
+        toast("Données Pythonista importées");
+        modal(`<h2 style="margin-top:0">Migration</h2><div class="meta">${out.map(esc).join("<br>")}</div>
+          <div class="meta" style="margin-top:8px">Les images ne sont pas incluses : importe ensuite tes dossiers/archives de chapitres.</div>
+          <div class="actions"><button class="primary" id="sok">OK</button></div>`);
+        document.getElementById("sok").onclick = () => { closeModal(); route(); };
+      } catch (e) { toast("Erreur : " + e.message, 4000); seed.disabled = false; seed.textContent = "Importer fiches & stats Pythonista"; }
+    };
     hydrateCovers();
   };
   q.oninput = render; sort.onchange = render;
@@ -155,7 +167,7 @@ async function viewManga(id, delMode) {
       ${lastC && lastC !== first ? `<button onclick="go('#/r/${enc(m.id)}/${enc(lastC.id)}')">⏭ Dernier</button>` : ""}
       <button id="more">⋯</button>
     </div>
-    ${delMode ? `<div class="banner">🗑 Mode suppression : touche 🗑 pour effacer un chapitre de l'appareil. <button class="ghost" onclick="viewManga('${esc(id).replace(/'/g, "\\'")}')">Terminer</button></div>` : ""}
+    ${delMode ? `<div class="banner">🗑 Mode suppression : touche 🗑 pour effacer un chapitre de l'appareil. <button class="ghost" id="deldone">Terminer</button></div>` : ""}
     <div class="row" style="margin:14px 0 8px"><h2 class="grow" style="margin:0">Chapitres</h2><button class="ghost" id="order">${desc ? "↓ Récents d'abord" : "↑ Anciens d'abord"}</button></div>
     <div class="list" id="chl">${chs.map(c => `
       <div class="li ${c.read ? "read" : ""} ${m.last && m.last.chapter === c.id ? "cur" : ""}">
@@ -166,6 +178,7 @@ async function viewManga(id, delMode) {
   </main>` + tabbar("lib");
   hydrateCovers();
   const sum = document.getElementById("sum"); if (sum) sum.onclick = () => sum.classList.toggle("open");
+  const deldone = document.getElementById("deldone"); if (deldone) deldone.onclick = () => viewManga(id, false);
   document.getElementById("order").onclick = () => { LS.set("desc_" + id, !desc); viewManga(id, delMode); };
   document.getElementById("chl").onclick = async e => {
     const t = e.target.closest("[data-toggle]");
@@ -237,11 +250,15 @@ async function askManga(fileName) {
   return new Promise(res => {
     const card = modal(`<h2 style="margin-top:0">À quel manga correspond ${esc(fileName)} ?</h2>
       <div class="meta">Safari ne donne pas le nom du dossier d'un fichier choisi seul. Choisis le manga (dossier) d'origine.</div>
-      <select id="am" style="width:100%;margin:10px 0">${ids.map(i => `<option>${esc(i)}</option>`).join("")}</select>
-      <input class="search" id="amt" placeholder="…ou tape l'identifiant du dossier (slug)">
+      ${ids.length ? `<select id="am" style="width:100%;margin:10px 0">${ids.map(i => `<option>${esc(i)}</option>`).join("")}</select>` : `<div class="meta" style="margin:8px 0">Aucun manga connu pour l'instant — tape le slug du dossier.</div>`}
+      <input class="search" id="amt" placeholder="…ou tape l'identifiant du dossier (slug)" ${ids.length ? "" : "autofocus"}>
       <div class="actions"><button class="primary" id="amok">Valider</button><button id="amskip">Ignorer ce fichier</button></div>`);
     document.getElementById("modal").dataset.lock = "1";
-    card.querySelector("#amok").onclick = () => { const v = card.querySelector("#amt").value.trim() || card.querySelector("#am").value; closeModal(); res(v || null); };
+    card.querySelector("#amok").onclick = () => {
+      const sel = card.querySelector("#am");
+      const v = card.querySelector("#amt").value.trim() || (sel && sel.value) || "";
+      closeModal(); res(v || null);
+    };
     card.querySelector("#amskip").onclick = () => { closeModal(); res(null); };
   });
 }
@@ -272,20 +289,37 @@ async function viewReader(mid, cid) {
   const d = await MRDB.chapter(mid, cid), N = d.pages.length;
   $app.innerHTML = `
   <div class="rprog" id="rprog"></div>
-  <div class="rbar top" id="rtop"><div class="row"><button class="ghost" onclick="go('#/m/${enc(mid)}')">‹</button>
-    <div class="grow"><div class="ttl">${esc(d.title)}</div><div class="sub">${esc(d.chapter.label)} · ${d.index + 1}/${d.count} · ${N} pages</div></div>
-    <button class="ghost" onclick="go('#/m/${enc(mid)}')">☰</button></div></div>
+  <div class="rbar top" id="rtop"><div class="row"><button class="ghost" id="rback">‹</button>
+    <div class="grow" id="rpick" role="button" tabindex="0"><div class="ttl">${esc(d.title)}</div><div class="sub">${esc(d.chapter.label)} · ${d.index + 1}/${d.count} · ${N} pages ▾</div></div>
+    <button class="ghost" id="rmenu">☰</button></div></div>
   <div class="reader" id="reader"><div style="height:calc(env(safe-area-inset-top) + 56px)"></div>
     ${d.pages.map((p, i) => `<img class="page" data-i="${i}" alt="" style="aspect-ratio:${p.w && p.h ? p.w + "/" + p.h : "720/1100"}">`).join("")}
     <div class="chend" id="chend"><div>Fin de ${esc(d.chapter.label)}</div><div class="actions">
-      ${d.prev ? `<button onclick="go('#/r/${enc(mid)}/${enc(d.prev)}')">‹ Précédent</button>` : ""}
-      ${d.next ? `<button class="primary" onclick="go('#/r/${enc(mid)}/${enc(d.next)}')">Chapitre suivant ›</button>` : `<button onclick="go('#/m/${enc(mid)}')">Dernier chapitre — retour à la fiche</button>`}
+      ${d.prev ? `<button id="rprev2">‹ Précédent</button>` : ""}
+      ${d.next ? `<button class="primary" id="rnext2">Chapitre suivant ›</button>` : `<button id="rdone">Dernier chapitre — retour à la fiche</button>`}
     </div></div></div>
   <div class="rbar bot" id="rbot"><div class="row">
-    <button ${d.prev ? "" : "disabled"} onclick="go('#/r/${enc(mid)}/${enc(d.prev || "")}')">‹ Préc.</button>
+    <button ${d.prev ? "" : "disabled"} id="rprev">‹ Préc.</button>
     <div class="grow" style="text-align:center"><span class="sub" id="rpage">1 / ${N}</span></div>
-    <button ${d.next ? "" : "disabled"} onclick="go('#/r/${enc(mid)}/${enc(d.next || "")}')">Suiv. ›</button></div></div>`;
+    <button ${d.next ? "" : "disabled"} id="rnext">Suiv. ›</button></div></div>`;
   window.scrollTo(0, 0);
+  const goManga = () => go("#/m/" + enc(mid));
+  const goCh = id => go("#/r/" + enc(mid) + "/" + enc(id));
+  document.getElementById("rback").onclick = goManga;
+  document.getElementById("rmenu").onclick = goManga;
+  const rprev = document.getElementById("rprev"); if (rprev && d.prev) rprev.onclick = () => goCh(d.prev);
+  const rnext = document.getElementById("rnext"); if (rnext && d.next) rnext.onclick = () => goCh(d.next);
+  const rprev2 = document.getElementById("rprev2"); if (rprev2) rprev2.onclick = () => goCh(d.prev);
+  const rnext2 = document.getElementById("rnext2"); if (rnext2) rnext2.onclick = () => goCh(d.next);
+  const rdone = document.getElementById("rdone"); if (rdone) rdone.onclick = goManga;
+  document.getElementById("rpick").onclick = async () => {
+    const m = await MRDB.manga(mid);
+    const card = modal(`<h2 style="margin-top:0">Chapitres</h2><div class="list" id="pickl">${m.chapters.map(c => `
+      <a class="li ${c.id === cid ? "cur" : ""} ${c.read ? "read" : ""}" href="#/r/${enc(mid)}/${enc(c.id)}">
+        <span class="grow lbl">${esc(c.label)}</span><span class="meta">${c.pageCount} p.${c.read ? " · ✅" : ""}</span>
+      </a>`).join("")}</div>`);
+    card.querySelector("#pickl").onclick = () => closeModal();
+  };
   const imgs = Array.from(document.querySelectorAll("img.page"));
   const live = new Map();     // index -> objectURL
   const load = async i => {
@@ -406,7 +440,11 @@ async function viewSettings() {
 
     <h2>🗂 Données de lecture</h2>
     <div class="meta">Importe les JSON de l'ancienne appli Pythonista : <code>reading_stats.json</code>, <code>library_index.json</code>, <code>last_chapters_seen.json</code>, et dans chaque dossier manga <code>progress.json</code> / <code>.last_chapter</code> (le manga te sera demandé). Ou restaure une sauvegarde.</div>
-    <div class="actions"><button id="bjson">⬆️ Importer des JSON</button><button class="primary" id="bexport">⬇️ Exporter une sauvegarde</button></div>
+    <div class="actions">
+      <button id="bbundle">📦 Fiches & stats fournies</button>
+      <button id="bjson">⬆️ Importer des JSON</button>
+      <button class="primary" id="bexport">⬇️ Exporter une sauvegarde</button>
+    </div>
     <input type="file" id="ijson" multiple class="hidden">
 
     <h2>✨ AniList</h2>
@@ -430,10 +468,22 @@ async function viewSettings() {
     if (!confirm(`Supprimer « ${m.title} » (${fmtSize(m.size)}) de l'appareil ? La progression est conservée.`)) return;
     await MRDB.deleteManga(m.id, true); toast("Supprimé"); viewSettings();
   });
+  document.getElementById("bbundle").onclick = async e => {
+    const btn = e.target; btn.disabled = true;
+    try {
+      const out = await MRDB.importBundledPythonista();
+      modal(`<h2 style="margin-top:0">Données importées</h2><div class="meta">${out.map(esc).join("<br>")}</div>
+        <div class="meta" style="margin-top:8px">Les images restent à importer (dossiers / .cbz).</div>
+        <div class="actions"><button class="primary" id="bok">OK</button></div>`);
+      document.getElementById("bok").onclick = () => { closeModal(); viewSettings(); };
+    } catch (err) { toast("Erreur : " + err.message, 4000); }
+    btn.disabled = false;
+  };
   document.getElementById("bjson").onclick = () => ijson.click();
   ijson.onchange = async () => {
     const out = await MRDB.importData(ijson.files, askManga);
-    modal(`<h2 style="margin-top:0">Données importées</h2><div class="meta">${out.map(esc).join("<br>")}</div><div class="actions"><button class="primary" onclick="closeModal()">OK</button></div>`);
+    modal(`<h2 style="margin-top:0">Données importées</h2><div class="meta">${out.map(esc).join("<br>")}</div><div class="actions"><button class="primary" id="jok">OK</button></div>`);
+    document.getElementById("jok").onclick = () => closeModal();
   };
   document.getElementById("bexport").onclick = async () => {
     const b = await MRDB.backup();
