@@ -54,7 +54,8 @@ const MRDB = (() => {
   const numKey = n => { const f = parseFloat(n); return Number.isInteger(f) ? f.toFixed(1) : String(f); };   // "233.0" comme Python
   const chKey = (mid, cid) => mid + SEP + cid;
   const fmtNum = n => n == null ? "" : (Number.isInteger(n) ? String(n) : String(n));
-  const stripExt = n => n.replace(/\.[^.\/]+$/, "");
+  // Ne retire que les vraies extensions (lettres), pas ".12" dans "vol.12" / "ch.03"
+  const stripExt = n => n.replace(/\.(?:jpe?g|png|webp|gif|avif|bmp|cbz|zip|json)$/i, "");
   const baseName = p => p.split("/").pop();
   const titleFromSlug = s => stripExt(s).replace(/[-_]+/g, " ").trim().replace(/\b\p{L}/gu, c => c.toUpperCase());
   const slugify = s => (s.normalize("NFC").replace(/[^\p{L}\p{N}\s-]/gu, "").trim().toLowerCase().replace(/[\s_]+/g, "-")) || "manga";
@@ -73,13 +74,15 @@ const MRDB = (() => {
     if (id === "_root") return "Pages";
     if (number == null) return stripExt(baseName(id));
     const stem = stripExt(baseName(id));
-    const isVol = /(?:^|[^a-z])(vol(?:ume)?|tome|t)\.?\s*\d/i.test(stem) && !/(?:chapitre|chapter|chap|ch)[\s._#-]*\d/i.test(stem);
+    // Accepte tome_03 / vol.3 / T.12 (séparateurs espace, point, tiret, underscore)
+    const isVol = /(?:^|[^a-z])(vol(?:ume)?|tome|t)[\s._#-]*\d/i.test(stem)
+      && !/(?:chapitre|chapter|chap|ch|episode|épisode|ep)[\s._#-]*\d/i.test(stem);
     return (isVol ? "Tome " : "Chapitre ") + fmtNum(number);
   }
-  const looksLikeChapterDir = d => /^chapter_\d+/.test(d) || /(chapitre|chapter|chap|ch|episode|épisode|ep|vol(ume)?|tome)[\s._#-]*\d/i.test(d) || /^\d+([._,]\d+)?$/.test(d.trim());
+  const looksLikeChapterDir = d => /^chapter_\d+/.test(d) || /(chapitre|chapter|chap|ch|episode|épisode|ep|vol(?:ume)?|tome)[\s._#-]*\d/i.test(d) || /^\d+([._,]\d+)?$/.test(d.trim());
   const mangaNameFromArchive = n => {
     const stem = stripExt(baseName(n));
-    const t = stem.replace(/[\s._-]*(?:chapitre|chapter|chap|ch|vol(?:ume)?|tome|t|#)[\s._#-]*\d+(?:[.,]\d+)?.*$/i, "").replace(/[\s._-]+$/, "").trim();
+    const t = stem.replace(/[\s._-]*(?:chapitre|chapter|chap|ch|episode|épisode|ep|vol(?:ume)?|tome|t|#)[\s._#-]*\d+(?:[.,]\d+)?.*$/i, "").replace(/[\s._-]+$/, "").trim();
     return t || stem;
   };
 
@@ -164,21 +167,36 @@ const MRDB = (() => {
     return null;
   }
   async function library() {
-    const [mangas, chapters, M] = await Promise.all([all("mangas"), all("chapters"), meta()]);
+    const [mangas, chapters, M, allProg, allLastCh] = await Promise.all([
+      all("mangas"), all("chapters"), meta(), kvAll("progress:"), kvAll("lastchapter:")
+    ]);
     const byM = {}; for (const c of chapters) (byM[c.manga] = byM[c.manga] || []).push(c);
     const out = [], genres = new Set();
     for (const m of mangas) {
       const chs = sortChapters(byM[m.id] || []);
-      const mm = merged(m, M), prog = await loadProgress(m.id);
+      const mm = merged(m, M);
+      const raw = allProg[m.id] || {}, prog = {};
+      for (const [k, v] of Object.entries(raw)) prog[/^-?\d+(\.\d+)?$/.test(k) ? numKey(k) : k] = v;
       const keys = new Set(chs.map(progressKey));
       const read = Object.entries(prog).filter(([k, v]) => v === "read" && keys.has(k)).length;
       const nums = chs.map(c => c.number).filter(n => n != null);
-      const pos = await lastPosition(m.id, chs, M);
+      // lastPosition sans aller-retour IDB (cache déjà chargé)
+      let pos = null;
+      const ids = chs.map(c => c.id), st = M.state[m.id];
+      if (st && ids.includes(st.chapter)) pos = {chapter: st.chapter, ratio: st.ratio || 0, ts: st.ts || 0};
+      else {
+        const lc = allLastCh[m.id];
+        if (lc && typeof lc === "object") {
+          if (ids.includes(lc.folder)) pos = {chapter: lc.folder, ratio: lc.ratio || 0, ts: lc.ts || 0};
+          else if (Number.isInteger(lc.index) && lc.index >= 0 && lc.index < chs.length) pos = {chapter: chs[lc.index].id, ratio: 0, ts: lc.ts || 0};
+        }
+        if (!pos) for (const s of M.sl[m.id] || []) if (ids.includes(s.chapter_folder)) { pos = {chapter: s.chapter_folder, ratio: 0, ts: s.last_ts || s.start_ts || 0}; break; }
+      }
       if (pos) { const c = chs.find(x => x.id === pos.chapter); pos.label = c ? c.label : pos.chapter; }
       mm.genres.forEach(g => genres.add(g));
       out.push({id: m.id, title: mm.title, genres: mm.genres, score: mm.score, nb_chapters: chs.length, read_count: read,
         max_local: nums.length ? Math.max(...nums) : null, last_known: M.lastSeen[m.id] != null ? M.lastSeen[m.id] : null, last: pos,
-        size: chs.reduce((s, c) => s + (c.size || 0), 0)});
+        size: chs.reduce((s, c) => s + (c.size || 0), 0), read_seconds: (M.sl[m.id] || []).reduce((s, x) => s + (x.duration_sec || 0), 0)});
     }
     return {mangas: out, genres: [...genres].sort((a, b) => a.localeCompare(b, "fr"))};
   }
@@ -269,28 +287,44 @@ const MRDB = (() => {
   }
   async function storeChapter(mid, cid, items, onPage) {
     // items : [{name, getBlob: async () => Blob}]
+    // Prépare les blobs hors transaction, puis écrit tout d'un coup (évite chapitres partiels).
     items.sort((a, b) => natCmp(a.name, b.name));
     const key = chKey(mid, cid);
-    await deleteChapterData(key);
-    const pages = []; let size = 0;
+    const prepared = [];
     for (let i = 0; i < items.length; i++) {
       const blob = await items[i].getBlob();
       const dim = await imageSize(blob);
-      await put("pages", blob, key + SEP + i);
-      pages.push({w: dim.w, h: dim.h, size: blob.size, type: blob.type});
-      size += blob.size;
-      if (i === 0 && !(await get("covers", mid))) await put("covers", await makeThumb(blob), mid);
+      prepared.push({blob, dim});
       onPage && onPage();
     }
-    const number = cid === "_root" ? null : parseChapterNumber(baseName(cid));
-    await put("chapters", {key, manga: mid, id: cid, number, label: chapterLabel(cid, number), kind: ZIP_RE.test(cid) ? "zip" : "dir", pages, size, addedAt: Date.now()});
+    let coverThumb = null;
+    if (prepared.length && !(await get("covers", mid))) coverThumb = await makeThumb(prepared[0].blob);
+    await deleteChapterData(key);
+    const pages = []; let size = 0;
+    await tx(["pages", "chapters", "covers"], "readwrite", t => {
+      const ps = t.objectStore("pages"), cs = t.objectStore("chapters"), cov = t.objectStore("covers");
+      for (let i = 0; i < prepared.length; i++) {
+        const {blob, dim} = prepared[i];
+        ps.put(blob, key + SEP + i);
+        pages.push({w: dim.w, h: dim.h, size: blob.size, type: blob.type});
+        size += blob.size;
+      }
+      const number = cid === "_root" ? null : parseChapterNumber(baseName(cid));
+      cs.put({key, manga: mid, id: cid, number, label: chapterLabel(cid, number), kind: ZIP_RE.test(cid) ? "zip" : "dir", pages, size, addedAt: Date.now()});
+      if (coverThumb) cov.put(coverThumb, mid);
+    });
     return pages.length;
   }
   async function deleteChapterData(key) {
-    await tx(["pages", "chapters"], "readwrite", t => {
-      t.objectStore("pages").delete(IDBKeyRange.bound(key + SEP, key + SEP + "\uffff"));
+    // Curseur : plus fiable que delete(range) sur certaines WebKit (clés hors ligne).
+    await tx(["pages", "chapters"], "readwrite", t => new Promise((res, rej) => {
+      const ps = t.objectStore("pages");
+      const range = IDBKeyRange.bound(key + SEP, key + SEP + "\uffff");
+      const r = ps.openCursor(range);
+      r.onsuccess = () => { const c = r.result; if (c) { c.delete(); c.continue(); } else res(); };
+      r.onerror = () => rej(r.error);
       t.objectStore("chapters").delete(key);
-    });
+    }));
   }
   async function deleteChapter(mid, cid) { await deleteChapterData(chKey(mid, cid)); }
   async function deleteManga(mid, keepProgress) {
@@ -306,7 +340,8 @@ const MRDB = (() => {
     const say = onStep || (() => {});
     const res = {mangas: new Set(), chapters: 0, pages: 0, data: [], skipped: [], errors: []};
     const path = f => (f.webkitRelativePath || f.name).split("/").filter(Boolean);
-    const hidden = p => p.some(s => s.startsWith(".") && s !== ".last_chapter" || s === "__MACOSX");
+    // Précédence : un segment est caché s'il est __MACOSX, ou s'il commence par "." (sauf .last_chapter).
+    const hidden = p => p.some(s => s === "__MACOSX" || (s.startsWith(".") && s !== ".last_chapter"));
     const forced = opts.manga ? opts.manga.trim() : "";
     const forcedId = opts.mangaId || (forced ? slugify(forced) : null);
     const defaultManga = forced || ("Import " + new Date().toLocaleDateString("fr-FR"));
@@ -476,7 +511,24 @@ const MRDB = (() => {
   async function persist() { try { return navigator.storage && navigator.storage.persist ? await navigator.storage.persist() : false; } catch (e) { return false; } }
   async function wipe() { (await open()).close(); dbp = null; await reqP(indexedDB.deleteDatabase(DB_NAME)); }
 
+  /* Import des JSON Pythonista fournis avec l'appli (data/*.json) — une seule fois ou à la demande. */
+  async function importBundledPythonista() {
+    const files = ["library_index.json", "reading_stats.json", "last_chapters_seen.json"];
+    const blobs = [];
+    for (const name of files) {
+      try {
+        const r = await fetch("./data/" + name, {cache: "no-cache"});
+        if (!r.ok) continue;
+        blobs.push(new File([await r.blob()], name, {type: "application/json"}));
+      } catch (e) {}
+    }
+    if (!blobs.length) throw new Error("Fichiers data/ introuvables (hors ligne ?)");
+    const out = await importData(blobs, null);
+    await kvSet("bundled_imported_at", Date.now());
+    return out;
+  }
+
   return {open, library, manga, chapter, pageBlob, coverBlob, setRead, savePosition, recordSession, stats, importFiles, importData,
-    backup, restore, aniSearch, aniApply, deleteChapter, deleteManga, renameManga, storage, persist, wipe, kvGet, kvSet,
+    importBundledPythonista, backup, restore, aniSearch, aniApply, deleteChapter, deleteManga, renameManga, storage, persist, wipe, kvGet, kvSet,
     _t: {parseChapterNumber, chapterLabel, looksLikeChapterDir, mangaNameFromArchive, numKey, imageSize, slugify}};
 })();
